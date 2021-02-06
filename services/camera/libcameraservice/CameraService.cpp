@@ -16,7 +16,7 @@
 
 #define LOG_TAG "CameraService"
 #define ATRACE_TAG ATRACE_TAG_CAMERA
-//#define LOG_NDEBUG 0
+#define LOG_NDEBUG 0
 
 #include <algorithm>
 #include <climits>
@@ -25,6 +25,7 @@
 #include <ctime>
 #include <string>
 #include <sys/types.h>
+#include <sys/wait.h>
 #include <inttypes.h>
 #include <pthread.h>
 
@@ -139,6 +140,7 @@ Mutex CameraService::sProxyMutex;
 sp<hardware::ICameraServiceProxy> CameraService::sCameraServiceProxy;
 
 CameraService::CameraService() :
+        mPhysicalFrontCamStatus(false),
         mEventLog(DEFAULT_EVENT_LOG_LENGTH),
         mNumberOfCameras(0),
         mNumberOfCamerasWithoutSystemCamera(0),
@@ -233,10 +235,11 @@ status_t CameraService::enumerateProviders() {
             if (!cameraFound) {
                 addStates(id8);
             }
-        }
-
-        if (getCameraState(id8) == nullptr) {
             onDeviceStatusChanged(id8, CameraDeviceStatus::PRESENT);
+        } else {
+            if (getCameraState(id8) == nullptr) {
+                onDeviceStatusChanged(id8, CameraDeviceStatus::PRESENT);
+            }
         }
     }
 
@@ -315,7 +318,7 @@ status_t CameraService::getSystemCameraKind(const String8& cameraId, SystemCamer
 }
 
 void CameraService::updateCameraNumAndIds() {
-    Mutex::Autolock l(mServiceLock);
+    //Mutex::Autolock l(mServiceLock);
     std::pair<int, int> systemAndNonSystemCameras = mCameraProviderManager->getCameraCount();
     // Excludes hidden secure cameras
     mNumberOfCameras =
@@ -1793,6 +1796,7 @@ Status CameraService::connectHelper(const sp<CALLBACK>& cameraCb, const String8&
             mServiceLock.lock();
         } else {
             // Otherwise, add client to active clients list
+            physicalFrontCam(cameraId == "1");
             finishConnectLocked(client, partial);
         }
     } // lock is destroyed, allow further connect calls
@@ -1872,6 +1876,27 @@ status_t CameraService::addOfflineClient(String8 cameraId, sp<BasicClient> offli
     } // lock is destroyed, allow further connect calls
 
     return OK;
+}
+
+void CameraService::physicalFrontCam(bool on) {
+    if(on == mPhysicalFrontCamStatus) return;
+    mPhysicalFrontCamStatus = on;
+
+    if(access("/dev/asusMotoDrv", F_OK) == 0) {
+        int pid = fork();
+        if(pid == 0) {
+            const char* cmd[] = {
+                "/system/bin/asus-motor",
+                "0",
+                NULL
+            };
+            cmd[1] = on ? "0" : "1";
+            execve("/system/bin/asus-motor", (char**)cmd, environ);
+            _exit(1);
+        } else {
+            waitpid(pid, NULL, 0);
+        }
+    }
 }
 
 Status CameraService::setTorchMode(const String16& cameraId, bool enabled,
@@ -2848,6 +2873,8 @@ binder::Status CameraService::BasicClient::disconnect() {
         return res;
     }
     mDisconnected = true;
+
+    sCameraService->physicalFrontCam(false);
 
     sCameraService->removeByClient(this);
     sCameraService->logDisconnected(mCameraIdStr, mClientPid, String8(mClientPackageName));
